@@ -8,8 +8,7 @@ import org.gradle.api.tasks.testing.logging.TestLogEvent
 
 val ciSigningKey: String? = System.getenv("PGP_PRIVATE_SIGNING_KEY")
 val ciSigningPassword: String? = System.getenv("PGP_PRIVATE_SIGNING_KEY_PASSWORD")
-val shouldSignCIRelease: Boolean
-    get() = !ciSigningKey.isNullOrEmpty() && !ciSigningPassword.isNullOrEmpty()
+val shouldSignCIRelease = !ciSigningKey.isNullOrEmpty() && !ciSigningPassword.isNullOrEmpty()
 
 val lastCommitHash: String = providers.exec {
     commandLine("git", "rev-parse", "--short", "HEAD")
