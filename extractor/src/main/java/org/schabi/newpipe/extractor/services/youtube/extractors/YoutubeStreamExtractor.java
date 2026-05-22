@@ -888,12 +888,14 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         setStreamType();
 
         // iOS als zusaetzlicher Fallback (Originalverhalten).
-        if (!forceWebEmbed) {
+        if (!forceWebEmbed && fetchIosClient) {
             final PoTokenResult iosPoTokenResult = noPoTokenProviderSet ? null
                     : poTokenProviderInstance.getIosClientPoToken(videoId);
             fetchIosClient(localization, contentCountry, videoId, iosPoTokenResult);
-        } else {
-            System.out.println("[NPE] FORCE_WEBEMBED active — skipping iOS");
+        } else if (forceWebEmbed) {
+            System.out.println("[NPE] FORCE_WEBEMBED active - skipping iOS");
+        } else if (!fetchIosClient) {
+            System.out.println("[NPE] setFetchIosClient(false) - skipping iOS");
         }
 
         if (!androidOk && iosStreamingData == null && webEmbedStreamingData == null
