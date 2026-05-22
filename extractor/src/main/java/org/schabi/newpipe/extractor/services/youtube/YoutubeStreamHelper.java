@@ -122,6 +122,137 @@ public final class YoutubeStreamHelper {
                 getDownloader().postWithContentTypeJson(url, headers, body, localization)));
     }
 
+    // ============================================================
+    // Custom: modern WebEmbed body (2026-05-22).
+    // YouTube extended WEB_EMBEDDED_PLAYER's innertube request to require
+    // appInstallData, encryptedHostFlags, embeddedPlayerEncryptedContext
+    // and rolloutToken from the embed page's ytcfg. Without them the API
+    // answers "Video player configuration error" for every video.
+    //
+    // We bypass NPE's prepareJsonBuilder for this client and assemble the
+    // body manually -- it's a one-off shape that does not benefit from
+    // sharing NPE's generic builder.
+    public static JsonObject getWebEmbeddedPlayerResponseModern(
+            @Nonnull final org.schabi.newpipe.extractor.localization.Localization localization,
+            @Nonnull final String videoId,
+            final int signatureTimestamp) throws IOException, ExtractionException {
+        final String embedUrl = "https://www.youtube.com/embed/" + videoId;
+        final String userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                + "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+        // Referer/embedUrl: YouTube validates the embed-fetch's Referer against
+        // a reputation list. Direct fetches (no Referer or Referer=youtube.com)
+        // get bot-flagged "decoy" ytcfg values that fail the player API call.
+        // We default to reddit.com (yt-dlp's choice); env-override in case
+        // Google flags it. Must match the embedUrl we put in body.thirdParty.
+        final String envReferer = System.getenv("WEBEMBED_REFERER");
+        final String thirdPartyReferer = (envReferer != null && !envReferer.isEmpty())
+                ? envReferer : "https://www.reddit.com/";
+
+        // 1. Fetch the embed page to pull the experiment-flag + context fields.
+        // CRITICAL: Referer: https://www.reddit.com/ -- YouTube treats embed
+        // fetches without a third-party referer as bot-scraping and serves
+        // decoy ytcfg values that fail validation in the player API call.
+        // yt-dlp uses the same trick.
+        final Map<String, java.util.List<String>> embedHeaders = new HashMap<>();
+        embedHeaders.put("User-Agent", java.util.List.of(userAgent));
+        embedHeaders.put("Accept", java.util.List.of("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"));
+        embedHeaders.put("Accept-Language", java.util.List.of("en-us,en;q=0.5"));
+        embedHeaders.put("Sec-Fetch-Mode", java.util.List.of("navigate"));
+        embedHeaders.put("Referer", java.util.List.of(thirdPartyReferer));
+        final String embedHtml = getDownloader().get(embedUrl, embedHeaders, localization).responseBody();
+
+        final String visitorData = extractEmbedField(embedHtml, "visitorData");
+        final String encryptedHostFlags = extractEmbedField(embedHtml, "encryptedHostFlags");
+        final String appInstallData = extractEmbedField(embedHtml, "appInstallData");
+        final String embeddedPlayerEncryptedContext = extractEmbedField(embedHtml, "embeddedPlayerEncryptedContext");
+        final String rolloutToken = extractEmbedField(embedHtml, "rolloutToken");
+        final String deviceExperimentId = extractEmbedField(embedHtml, "deviceExperimentId");
+        final String clickTrackingParams = extractEmbedField(embedHtml, "clickTrackingParams");
+
+        if (visitorData == null || encryptedHostFlags == null || appInstallData == null
+                || embeddedPlayerEncryptedContext == null) {
+            throw new ExtractionException("WebEmbed modern: required field missing in embed page "
+                    + "(visitorData=" + (visitorData != null) + " ehf=" + (encryptedHostFlags != null)
+                    + " aid=" + (appInstallData != null) + " epec=" + (embeddedPlayerEncryptedContext != null) + ")");
+        }
+
+        // 2. Build the modern request body. JSON-escape strings defensively.
+        final StringBuilder b = new StringBuilder(8192);
+        b.append('{');
+        b.append("\"context\":{\"client\":{");
+        b.append("\"hl\":\"en\",\"gl\":\"US\",");
+        b.append("\"clientName\":\"WEB_EMBEDDED_PLAYER\",");
+        b.append("\"clientVersion\":\"2.20260521.00.00\",");
+        b.append("\"visitorData\":\"").append(jsonEscape(visitorData)).append("\",");
+        b.append("\"userAgent\":\"").append(jsonEscape(userAgent)).append("\",");
+        b.append("\"osName\":\"Windows\",\"osVersion\":\"10.0\",");
+        b.append("\"platform\":\"DESKTOP\",\"clientFormFactor\":\"UNKNOWN_FORM_FACTOR\",");
+        b.append("\"originalUrl\":\"").append(jsonEscape(embedUrl)).append("?html5=1\",");
+        b.append("\"configInfo\":{\"appInstallData\":\"").append(jsonEscape(appInstallData)).append("\"},");
+        b.append("\"timeZone\":\"UTC\",\"browserName\":\"Chrome\",\"browserVersion\":\"141.0.0.0\",");
+        b.append("\"acceptHeader\":\"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\",");
+        b.append("\"deviceMake\":\"\",\"deviceModel\":\"\",");
+        if (deviceExperimentId != null) {
+            b.append("\"deviceExperimentId\":\"").append(jsonEscape(deviceExperimentId)).append("\",");
+        }
+        b.append("\"rolloutToken\":\"").append(jsonEscape(rolloutToken != null ? rolloutToken : "")).append("\",");
+        b.append("\"utcOffsetMinutes\":0");
+        b.append("},");
+        b.append("\"user\":{\"lockedSafetyMode\":false},");
+        b.append("\"request\":{\"useSsl\":true},");
+        if (clickTrackingParams != null) {
+            b.append("\"clickTracking\":{\"clickTrackingParams\":\"").append(jsonEscape(clickTrackingParams)).append("\"},");
+        }
+        b.append("\"thirdParty\":{");
+        b.append("\"embeddedPlayerContext\":{");
+        b.append("\"embeddedPlayerEncryptedContext\":\"").append(jsonEscape(embeddedPlayerEncryptedContext)).append("\",");
+        b.append("\"ancestorOriginsSupported\":false");
+        b.append("},");
+        b.append("\"embedUrl\":\"").append(jsonEscape(thirdPartyReferer)).append("\"");
+        b.append("}");
+        b.append("},");
+        b.append("\"videoId\":\"").append(jsonEscape(videoId)).append("\",");
+        b.append("\"playbackContext\":{\"contentPlaybackContext\":{");
+        b.append("\"html5Preference\":\"HTML5_PREF_WANTS\",");
+        b.append("\"signatureTimestamp\":").append(signatureTimestamp).append(',');
+        b.append("\"encryptedHostFlags\":\"").append(jsonEscape(encryptedHostFlags)).append('"');
+        b.append("}},");
+        b.append("\"contentCheckOk\":true,\"racyCheckOk\":true");
+        b.append('}');
+
+        // 3. POST it.
+        final Map<String, java.util.List<String>> postHeaders = new HashMap<>();
+        postHeaders.put("User-Agent", java.util.List.of(userAgent));
+        postHeaders.put("Content-Type", java.util.List.of("application/json"));
+        postHeaders.put("Origin", java.util.List.of("https://www.youtube.com"));
+        postHeaders.put("Referer", java.util.List.of(embedUrl));
+        postHeaders.put("X-Youtube-Client-Name", java.util.List.of("56"));
+        postHeaders.put("X-Youtube-Client-Version", java.util.List.of("2.20260521.00.00"));
+
+        final byte[] body = b.toString().getBytes(StandardCharsets.UTF_8);
+        final String url = YOUTUBEI_V1_URL + PLAYER + "?" + DISABLE_PRETTY_PRINT_PARAMETER;
+
+        return JsonUtils.toJsonObject(getValidJsonResponseBody(
+                getDownloader().postWithContentTypeJson(url, postHeaders, body, localization)));
+    }
+
+    /** Extract the *value* of "field":"value" from raw embed HTML. Returns null if absent. */
+    private static String extractEmbedField(final String html, final String fieldName) {
+        final String needle = "\"" + fieldName + "\":\"";
+        final int i = html.indexOf(needle);
+        if (i < 0) return null;
+        final int start = i + needle.length();
+        final int end = html.indexOf('"', start);
+        if (end < 0) return null;
+        return html.substring(start, end);
+    }
+
+    /** Minimal JSON string-escape for the fields we control (no embedded newlines etc). */
+    private static String jsonEscape(final String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
     public static JsonObject getAndroidPlayerResponse(
             @Nonnull final ContentCountry contentCountry,
             @Nonnull final Localization localization,

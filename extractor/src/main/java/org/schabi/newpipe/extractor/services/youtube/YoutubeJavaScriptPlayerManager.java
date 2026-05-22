@@ -132,6 +132,40 @@ public final class YoutubeJavaScriptPlayerManager {
     public static String deobfuscateSignature(@Nonnull final String videoId,
                                               @Nonnull final String obfuscatedSignature)
             throws ParsingException {
+        // Sidecar fallback: when NSIG_DECODER_URL is set, try the kuckuck-nsig
+        // sidecar first (it wraps yt-dlp's vendored JS solver). NPE's built-in
+        // deobfuscation regexes lag YouTube's player.js refactors; the sidecar
+        // tracks yt-dlp's actively-maintained solver. Falls back to local on
+        // sidecar error.
+        final String sidecarUrl = System.getenv("NSIG_DECODER_URL");
+        if (sidecarUrl != null && !sidecarUrl.isEmpty()) {
+            try {
+                final String sigUrl = sidecarUrl.replace("/decrypt_n", "/decrypt_sig");
+                final java.net.http.HttpClient hc = java.net.http.HttpClient.newHttpClient();
+                final String body = "{\"sig\":\"" + obfuscatedSignature.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
+                final java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+                        .uri(java.net.URI.create(sigUrl))
+                        .timeout(java.time.Duration.ofSeconds(3))
+                        .header("Content-Type", "application/json")
+                        .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
+                        .build();
+                final java.net.http.HttpResponse<String> resp = hc.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    final java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"sig\"\\s*:\\s*\"([^\"]+)\"").matcher(resp.body());
+                    if (m.find()) {
+                        return m.group(1);
+                    }
+                }
+                System.out.println("[NPE/sig-sidecar] failed status=" + resp.statusCode() + " body=" + resp.body().substring(0, Math.min(200, resp.body().length())));
+                throw new ParsingException("Sidecar sig decrypt returned " + resp.statusCode());
+            } catch (final ParsingException pe) {
+                throw pe;
+            } catch (final Exception e) {
+                System.out.println("[NPE/sig-sidecar] exception: " + e.getMessage());
+                throw new ParsingException("Sidecar sig decrypt error: " + e.getMessage(), e);
+            }
+        }
+
         // If the signature deobfuscation function has been not extracted on a previous call, this
         // mean that we will fail to extract it on next calls too if the player code has been not
         // changed
@@ -215,6 +249,46 @@ public final class YoutubeJavaScriptPlayerManager {
         // If the throttling parameter is not present, return the original streaming URL
         if (obfuscatedThrottlingParameter == null) {
             return streamingUrl;
+        }
+
+        // Honor NPE's existing per-obfuscated cache BEFORE calling sidecar
+        // — prevents double-decoding when URL is reprocessed elsewhere.
+        final String _cacheHit = CACHED_THROTTLING_PARAMETERS.get(obfuscatedThrottlingParameter);
+        if (_cacheHit != null) {
+            return streamingUrl.replace(obfuscatedThrottlingParameter, _cacheHit);
+        }
+
+        // Sidecar fallback for nsig — same logic as deobfuscateSignature.
+        final String _sidecarUrl = System.getenv("NSIG_DECODER_URL");
+        if (_sidecarUrl != null && !_sidecarUrl.isEmpty()) {
+            try {
+                final java.net.http.HttpClient hc = java.net.http.HttpClient.newHttpClient();
+                final String body = "{\"n\":\"" + obfuscatedThrottlingParameter.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
+                final java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+                        .uri(java.net.URI.create(_sidecarUrl))
+                        .timeout(java.time.Duration.ofSeconds(3))
+                        .header("Content-Type", "application/json")
+                        .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
+                        .build();
+                final java.net.http.HttpResponse<String> resp = hc.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    final java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"n\"\\s*:\\s*\"([^\"]+)\"").matcher(resp.body());
+                    if (m.find()) {
+                        final String decoded = m.group(1);
+                        CACHED_THROTTLING_PARAMETERS.put(obfuscatedThrottlingParameter, decoded);
+                        // Also cache decoded -> decoded so double-decode is a no-op
+                        CACHED_THROTTLING_PARAMETERS.put(decoded, decoded);
+                        return streamingUrl.replace(obfuscatedThrottlingParameter, decoded);
+                    }
+                }
+                System.out.println("[NPE/n-sidecar] failed status=" + resp.statusCode());
+                throw new ParsingException("Sidecar nsig decrypt returned " + resp.statusCode());
+            } catch (final ParsingException pe) {
+                throw pe;
+            } catch (final Exception e) {
+                System.out.println("[NPE/n-sidecar] exception: " + e.getMessage());
+                throw new ParsingException("Sidecar nsig decrypt error: " + e.getMessage(), e);
+            }
         }
 
         // Do not use the containsKey method of the Map interface in order to avoid a double

@@ -852,15 +852,61 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         final PoTokenResult androidPoTokenResult = noPoTokenProviderSet ? null
                 : poTokenProviderInstance.getAndroidClientPoToken(videoId);
 
+        // TEST: ENABLE_WEB_EMBED_MODERN bypasses Android entirely and uses
+        // the modern WEB_EMBEDDED_PLAYER body (with appInstallData,
+        // encryptedHostFlags, embeddedPlayerEncryptedContext from the embed
+        // page). Used to exercise the nsig-decoder sidecar end-to-end --
+        // web_embedded URLs carry the obfuscated n parameter that Android
+        // routes do not.
+        final boolean enableWebEmbedModern = "1".equals(System.getenv("ENABLE_WEB_EMBED_MODERN"));
+
         // ANDROID_VR first: bypasses googlevideo CDN throttling. No PoToken required.
-        fetchAndroidVrClient(localization, contentCountry, videoId);
+        if (!enableWebEmbedModern) {
+            fetchAndroidVrClient(localization, contentCountry, videoId);
+        }
 
         boolean androidOk = false;
-        try {
-            fetchAndroidClient(localization, contentCountry, videoId, androidPoTokenResult);
-            androidOk = true;
-        } catch (final SignInConfirmNotBotException eAndroid) {
-            // weiter mit iOS fallback (VR kann uns immer noch was geben)
+        if (!enableWebEmbedModern) {
+            try {
+                fetchAndroidClient(localization, contentCountry, videoId, androidPoTokenResult);
+                androidOk = true;
+            } catch (final SignInConfirmNotBotException eAndroid) {
+                // weiter mit iOS fallback (VR kann uns immer noch was geben)
+            }
+        }
+
+        // WebEmbed-modern test path
+        if (enableWebEmbedModern) {
+            try {
+                webEmbedCpn = generateContentPlaybackNonce();
+                final int sts = YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId);
+                final JsonObject webEmbedResp = YoutubeStreamHelper.getWebEmbeddedPlayerResponseModern(
+                        localization, videoId, sts);
+                try {
+                    final String pStatus = webEmbedResp.getObject(PLAYABILITY_STATUS).getString("status");
+                    final String pReason = webEmbedResp.getObject(PLAYABILITY_STATUS).getString("reason");
+                    System.out.println("[NPE/WebEmbedModern] playabilityStatus=" + pStatus + " reason=" + pReason);
+                } catch (Exception e) {
+                    System.out.println("[NPE/WebEmbedModern] could not read playabilityStatus");
+                }
+                if (!isPlayerResponseNotValid(webEmbedResp, videoId)) {
+                    webEmbedStreamingData = webEmbedResp.getObject(STREAMING_DATA);
+                    if (playerResponse == null) {
+                        playerResponse = webEmbedResp;
+                        System.out.println("[NPE/WebEmbedModern] playerResponse set, streamingData has " + (webEmbedStreamingData != null ? "data" : "NO data"));
+                    }
+                    if (isNullOrEmpty(playerCaptionsTracklistRenderer)) {
+                        playerCaptionsTracklistRenderer = webEmbedResp.getObject(CAPTIONS)
+                                .getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER);
+                    }
+                } else {
+                    final String dump = webEmbedResp.toString();
+                    System.out.println("[NPE/WebEmbedModern] response not valid for " + videoId
+                            + " -- first 500: " + dump.substring(0, Math.min(500, dump.length())));
+                }
+            } catch (final Exception eWE) {
+                System.out.println("[NPE/WebEmbedModern] failed: " + eWE.getMessage());
+            }
         }
 
         // WebEmbed removed (2026-05-22): YouTube has extended WEB_EMBEDDED_PLAYER
@@ -891,7 +937,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
             System.out.println("[NPE] setFetchIosClient(false) - skipping iOS");
         }
 
-        if (!androidOk && iosStreamingData == null && androidVrStreamingData == null) {
+        if (!androidOk && iosStreamingData == null && androidVrStreamingData == null
+                && webEmbedStreamingData == null) {
             throw new SignInConfirmNotBotException(
                 "YouTube probably temporarily blocked anonymous watch access with this IP");
         }
@@ -1372,8 +1419,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                 .filter(formatData -> !formatData.getString("mimeType", "")
                         .startsWith("text"))
                 .map(formatData -> {
+                    final int itag = formatData.getInt("itag");
                     try {
-                        final int itag = formatData.getInt("itag");
                         final int averageBitrate = formatData.getInt("averageBitrate");
                         final int fps = formatData.getInt("fps");
                         final String qualityLabel = formatData.getString("qualityLabel");
@@ -1385,9 +1432,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                             return buildAndAddItagInfoToList(videoId, formatData, itagItem,
                                     itagItem.itagType, contentPlaybackNonce, poToken);
                         }
-                    } catch (final ExtractionException ignored) {
-                        // If the itag is not supported, the n parameter of HTML5 clients cannot be
-                        // decoded or buildAndAddItagInfoToList fails, we end up here
+                    } catch (final Exception e) {
                     }
                     return null;
                 })
