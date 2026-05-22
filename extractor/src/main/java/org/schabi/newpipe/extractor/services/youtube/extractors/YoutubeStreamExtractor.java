@@ -852,54 +852,46 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         final PoTokenResult androidPoTokenResult = noPoTokenProviderSet ? null
                 : poTokenProviderInstance.getAndroidClientPoToken(videoId);
 
-        final boolean forceWebEmbed = "1".equals(System.getenv("FORCE_WEBEMBED"));
-
-        // ANDROID_VR first: it bypasses googlevideo CDN throttling that hits
-        // the other clients on many videos. No PoToken required. Best-effort
-        // so we still fall through to Android/iOS/WebEmbed if VR fails.
-        if (!forceWebEmbed) {
-            fetchAndroidVrClient(localization, contentCountry, videoId);
-        }
+        // ANDROID_VR first: bypasses googlevideo CDN throttling. No PoToken required.
+        fetchAndroidVrClient(localization, contentCountry, videoId);
 
         boolean androidOk = false;
-        if (!forceWebEmbed) {
-            try {
-                fetchAndroidClient(localization, contentCountry, videoId, androidPoTokenResult);
-                androidOk = true;
-            } catch (final SignInConfirmNotBotException eAndroid) {
-                // weiter mit iOS/WebEmbed fallback
-            }
-        } else {
-            System.out.println("[NPE] FORCE_WEBEMBED active — skipping Android");
+        try {
+            fetchAndroidClient(localization, contentCountry, videoId, androidPoTokenResult);
+            androidOk = true;
+        } catch (final SignInConfirmNotBotException eAndroid) {
+            // weiter mit iOS fallback (VR kann uns immer noch was geben)
         }
 
-        // EARLY WebEmbed: wenn Android nichts gesetzt hat, fuelle playerResponse jetzt
-        // — sonst crasht setStreamType() unten an null playerResponse.
-        if (!androidOk) {
-            try {
-                final PoTokenResult webEmbedPoTokenEarly = noPoTokenProviderSet ? null
-                        : poTokenProviderInstance.getWebEmbedClientPoToken(videoId);
-                fetchWebEmbedClient(localization, contentCountry, videoId, webEmbedPoTokenEarly);
-            } catch (final Exception eEarly) {
-                System.out.println("[NPE/WebEmbed] early WebEmbed failed: " + eEarly.getMessage());
-            }
+        // WebEmbed removed (2026-05-22): YouTube has extended WEB_EMBEDDED_PLAYER
+        // server-side to require appInstallData, encryptedHostFlags and
+        // embeddedPlayerEncryptedContext in the request body. Without those the
+        // Innertube API responds with "Video player configuration error". NPE
+        // builds the old-shape body and never gets a valid response, so
+        // WebEmbed has been a dead fallback in our cascade. Removed instead of
+        // chasing YouTube's experiment-flag shape on every refactor --
+        // ANDROID_VR + ANDROID are our robust paths.
+
+        // ANDROID_VR/ANDROID are now the only sources for playerResponse. If
+        // both failed the cascade is dead -- bail before setStreamType() NPEs.
+        if (playerResponse == null) {
+            throw new SignInConfirmNotBotException(
+                "YouTube blocked anonymous watch access (ANDROID_VR + ANDROID both failed)");
         }
 
         setStreamType();
 
-        // iOS als zusaetzlicher Fallback (Originalverhalten).
-        if (!forceWebEmbed && fetchIosClient) {
+        // iOS as additional fallback. Default-disabled via setFetchIosClient(false)
+        // in piped Main.java since 2026-05-22 (~2.3s p50 latency win).
+        if (fetchIosClient) {
             final PoTokenResult iosPoTokenResult = noPoTokenProviderSet ? null
                     : poTokenProviderInstance.getIosClientPoToken(videoId);
             fetchIosClient(localization, contentCountry, videoId, iosPoTokenResult);
-        } else if (forceWebEmbed) {
-            System.out.println("[NPE] FORCE_WEBEMBED active - skipping iOS");
-        } else if (!fetchIosClient) {
+        } else {
             System.out.println("[NPE] setFetchIosClient(false) - skipping iOS");
         }
 
-        if (!androidOk && iosStreamingData == null && webEmbedStreamingData == null
-                && androidVrStreamingData == null) {
+        if (!androidOk && iosStreamingData == null && androidVrStreamingData == null) {
             throw new SignInConfirmNotBotException(
                 "YouTube probably temporarily blocked anonymous watch access with this IP");
         }
