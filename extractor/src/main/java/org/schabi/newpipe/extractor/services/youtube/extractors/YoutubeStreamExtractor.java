@@ -861,6 +861,9 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         final boolean enableWebEmbedModern = "1".equals(System.getenv("ENABLE_WEB_EMBED_MODERN"));
 
         // ANDROID_VR first: bypasses googlevideo CDN throttling. No PoToken required.
+        // fetchAndroidVrClient swallows exceptions internally (sets state to null
+        // on failure), so no try-catch needed here -- failures show as null
+        // androidVrStreamingData/playerResponse and fall through to ANDROID.
         if (!enableWebEmbedModern) {
             fetchAndroidVrClient(localization, contentCountry, videoId);
         }
@@ -919,10 +922,36 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // ANDROID_VR + ANDROID are our robust paths.
 
         // ANDROID_VR/ANDROID are now the only sources for playerResponse. If
-        // both failed the cascade is dead -- bail before setStreamType() NPEs.
+        // both failed the cascade is dead -- before throwing, try WebEmbed-modern
+        // as last-resort auto-fallback. Env-flag (ENABLE_WEB_EMBED_MODERN) skips
+        // straight to WebEmbed at the top; here we use it only after Android
+        // cascade has been exhausted. Per-request scope: only runs on blocked
+        // videos, healthy videos stay on the fast Android-VR path.
+        if (playerResponse == null && !enableWebEmbedModern) {
+            try {
+                webEmbedCpn = generateContentPlaybackNonce();
+                final int sts = YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId);
+                final JsonObject webEmbedResp = YoutubeStreamHelper.getWebEmbeddedPlayerResponseModern(
+                        localization, videoId, sts);
+                if (!isPlayerResponseNotValid(webEmbedResp, videoId)) {
+                    webEmbedStreamingData = webEmbedResp.getObject(STREAMING_DATA);
+                    playerResponse = webEmbedResp;
+                    if (isNullOrEmpty(playerCaptionsTracklistRenderer)) {
+                        playerCaptionsTracklistRenderer = webEmbedResp.getObject(CAPTIONS)
+                                .getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER);
+                    }
+                    System.out.println("[NPE/WebEmbedFallback] auto-activated after Android cascade blocked");
+                } else {
+                    System.out.println("[NPE/WebEmbedFallback] response not valid for " + videoId);
+                }
+            } catch (final Exception eWE) {
+                System.out.println("[NPE/WebEmbedFallback] failed: " + eWE.getMessage());
+            }
+        }
+
         if (playerResponse == null) {
             throw new SignInConfirmNotBotException(
-                "YouTube blocked anonymous watch access (ANDROID_VR + ANDROID both failed)");
+                "YouTube blocked anonymous watch access (ANDROID_VR + ANDROID + WebEmbed-fallback all failed)");
         }
 
         setStreamType();
