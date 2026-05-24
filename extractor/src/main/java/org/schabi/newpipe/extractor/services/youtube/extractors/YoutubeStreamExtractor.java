@@ -106,6 +106,17 @@ public class YoutubeStreamExtractor extends StreamExtractor {
     private static final String PREMIERED = "Premiered ";
     private static final String PREMIERED_ON = "Premiered on ";
     private static final String FORMATS = "formats";
+
+    /**
+     * Per-Thread Force-Flag fuer WebEmbed-modern. piped-backend setzt das
+     * vor einem retry-Call wenn der HEAD-byte-range-check auf die
+     * ANDROID-URLs 403 ergibt (= googlevideo per-IP-pattern-throttle).
+     * Default false; ThreadLocal.remove() im finally-block essential
+     * weil supplyAsync()-Threads recycled werden.
+     */
+    public static final ThreadLocal<Boolean> FORCE_WEB_EMBED_FOR_THREAD =
+        ThreadLocal.withInitial(() -> Boolean.FALSE);
+
     private static final String ADAPTIVE_FORMATS = "adaptiveFormats";
     private static final String STREAMING_DATA = "streamingData";
     private static final String NEXT = "next";
@@ -858,7 +869,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // page). Used to exercise the nsig-decoder sidecar end-to-end --
         // web_embedded URLs carry the obfuscated n parameter that Android
         // routes do not.
-        final boolean enableWebEmbedModern = "1".equals(System.getenv("ENABLE_WEB_EMBED_MODERN"));
+        final boolean enableWebEmbedModern = "1".equals(System.getenv("ENABLE_WEB_EMBED_MODERN"))
+                || Boolean.TRUE.equals(FORCE_WEB_EMBED_FOR_THREAD.get());
 
         // ANDROID_VR first: bypasses googlevideo CDN throttling. No PoToken required.
         // fetchAndroidVrClient swallows exceptions internally (sets state to null
@@ -936,6 +948,18 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         //      Ohne diesen Fallback hat mpv keine separaten Audio/Video-Tracks
         //      und googlevideo throttled ANDROID-URLs fuer deep byte-range-fetches
         //      (= Scrub-forward = frozen frame).
+        // Trigger WebEmbed-modern fallback in zwei Faellen:
+        //  (a) playerResponse == null (= cascade dead, original 2026-05-23 logic)
+        //  (b) playerResponse vorhanden aber streamingData enthaelt keine adaptive
+        //      audio+video Formats (= ANDROID/ANDROID_VR returned nur einen legacy
+        //      combined progressive stream). Trifft alte/lange Videos wo
+        //      ANDROID_VR fehlschlaegt + ANDROID degraded liefert.
+        // Throttle-Pattern (= ANDROID-URLs werden fuer deep byte-range-fetches
+        // 403'd obwohl Response strukturell healthy) wird in piped-backend
+        // StreamHandlers via HEAD-check detected. Auf 403 setzt es
+        // FORCE_WEB_EMBED_FOR_THREAD und ruft NPE neu auf -- dann triggert
+        // enableWebEmbedModern oben (= WebEmbed direkt als primary, kein
+        // Fallback-Pfad noetig).
         final boolean degraded =
             !hasAdaptiveFormats(androidVrStreamingData) &&
             !hasAdaptiveFormats(androidStreamingData);
