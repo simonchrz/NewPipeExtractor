@@ -927,7 +927,22 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // straight to WebEmbed at the top; here we use it only after Android
         // cascade has been exhausted. Per-request scope: only runs on blocked
         // videos, healthy videos stay on the fast Android-VR path.
-        if (playerResponse == null && !enableWebEmbedModern) {
+        // Trigger WebEmbed-modern fallback in zwei Faellen:
+        //  (a) playerResponse == null (= cascade dead, original 2026-05-23 logic)
+        //  (b) playerResponse vorhanden aber streamingData enthaelt keine adaptive
+        //      audio+video Formats (= ANDROID/ANDROID_VR returned nur einen
+        //      legacy combined progressive stream, classic itag-18). Trifft alte/
+        //      lange Videos wo ANDROID_VR fehlschlaegt + ANDROID degraded liefert.
+        //      Ohne diesen Fallback hat mpv keine separaten Audio/Video-Tracks
+        //      und googlevideo throttled ANDROID-URLs fuer deep byte-range-fetches
+        //      (= Scrub-forward = frozen frame).
+        final boolean degraded =
+            !hasAdaptiveFormats(androidVrStreamingData) &&
+            !hasAdaptiveFormats(androidStreamingData);
+        if ((playerResponse == null || degraded) && !enableWebEmbedModern) {
+            if (playerResponse != null && degraded) {
+                System.out.println("[NPE/WebEmbedFallback] degraded streams (no adaptiveFormats in VR+ANDROID), triggering WebEmbed");
+            }
             try {
                 webEmbedCpn = generateContentPlaybackNonce();
                 final int sts = YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId);
@@ -982,6 +997,19 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                         .done())
                 .getBytes(StandardCharsets.UTF_8);
         nextResponse = getJsonPostResponse(NEXT, nextBody, localization);
+    }
+
+
+    /**
+     * Returns true if the given streamingData has at least one adaptive
+     * (DASH-style separate audio+video) format. Used to detect "degraded"
+     * responses where YouTube returns only legacy combined progressive
+     * streams instead of separate adaptive tracks.
+     */
+    private static boolean hasAdaptiveFormats(final JsonObject streamingData) {
+        if (streamingData == null) return false;
+        final JsonArray af = streamingData.getArray(ADAPTIVE_FORMATS);
+        return af != null && !af.isEmpty();
     }
 
     private static void checkPlayabilityStatus(@Nonnull final JsonObject playabilityStatus)
