@@ -97,6 +97,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -860,33 +863,47 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         final PoTokenProvider poTokenProviderInstance = poTokenProvider;
         final boolean noPoTokenProviderSet = poTokenProviderInstance == null;
 
-        final PoTokenResult androidPoTokenResult = noPoTokenProviderSet ? null
-                : poTokenProviderInstance.getAndroidClientPoToken(videoId);
-
-        // TEST: ENABLE_WEB_EMBED_MODERN bypasses Android entirely and uses
-        // the modern WEB_EMBEDDED_PLAYER body (with appInstallData,
-        // encryptedHostFlags, embeddedPlayerEncryptedContext from the embed
-        // page). Used to exercise the nsig-decoder sidecar end-to-end --
-        // web_embedded URLs carry the obfuscated n parameter that Android
-        // routes do not.
+        // ENABLE_WEB_EMBED_MODERN bypasses Android entirely and uses the modern
+        // WEB_EMBEDDED_PLAYER body (exercises the nsig-decoder sidecar). Set via
+        // env or per-thread FORCE flag (StreamHandlers' 403-throttle detection).
         final boolean enableWebEmbedModern = "1".equals(System.getenv("ENABLE_WEB_EMBED_MODERN"))
                 || Boolean.TRUE.equals(FORCE_WEB_EMBED_FOR_THREAD.get());
 
-        // ANDROID_VR first: bypasses googlevideo CDN throttling. No PoToken required.
-        // fetchAndroidVrClient swallows exceptions internally (sets state to null
-        // on failure), so no try-catch needed here -- failures show as null
-        // androidVrStreamingData/playerResponse and fall through to ANDROID.
-        if (!enableWebEmbedModern) {
-            fetchAndroidVrClient(localization, contentCountry, videoId);
-        }
-
+        // Android acquisition (PoToken mint + ANDROID_VR + ANDROID) under a
+        // bounded wait. Under a googlevideo per-IP throttle these requests don't
+        // fail cleanly -- each just sits until the Downloader's own 10s timeout,
+        // so the VR+ANDROID chain takes ~20s before the WebEmbed fallback below
+        // is even reached and the player's spinner gives up. Cap the whole Android
+        // acquisition at 6s; on timeout leave playerResponse null and fall through
+        // to the WebEmbed auto-fallback -- so WebEmbed kicks in automatically and
+        // fast WITHOUT the env flag. Abandoned worker threads are bounded by the
+        // Downloader's 10s read timeout, so the pool can't accumulate them forever.
         boolean androidOk = false;
         if (!enableWebEmbedModern) {
             try {
-                fetchAndroidClient(localization, contentCountry, videoId, androidPoTokenResult);
-                androidOk = true;
-            } catch (final SignInConfirmNotBotException eAndroid) {
-                // weiter mit iOS fallback (VR kann uns immer noch was geben)
+                androidOk = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        final PoTokenResult androidPoTokenResult = noPoTokenProviderSet ? null
+                                : poTokenProviderInstance.getAndroidClientPoToken(videoId);
+                        // ANDROID_VR first: bypasses googlevideo CDN throttling, no
+                        // PoToken. Swallows its own exceptions (state -> null).
+                        fetchAndroidVrClient(localization, contentCountry, videoId);
+                        fetchAndroidClient(localization, contentCountry, videoId, androidPoTokenResult);
+                        return Boolean.TRUE;
+                    } catch (final Exception eAndroid) {
+                        // Any failure -- SignInConfirmNotBotException, IOException
+                        // (incl. the Downloader's own timeout), ExtractionException:
+                        // VR may still have data, and the WebEmbed fallback below
+                        // covers a fully-empty playerResponse. (Supplier can't throw
+                        // checked exceptions, so we must catch here.)
+                        return Boolean.FALSE;
+                    }
+                }).get(6, TimeUnit.SECONDS);
+            } catch (final TimeoutException eTimeout) {
+                System.out.println("[NPE] Android cascade > 6s (throttle?) -- auto-WebEmbed fallback for " + videoId);
+            } catch (final Exception eAndroidOuter) {
+                System.out.println("[NPE] Android cascade failed ("
+                        + eAndroidOuter.getClass().getSimpleName() + ") -- auto-WebEmbed fallback");
             }
         }
 
