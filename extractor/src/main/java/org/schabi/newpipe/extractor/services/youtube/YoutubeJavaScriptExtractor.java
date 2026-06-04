@@ -34,8 +34,12 @@ final class YoutubeJavaScriptExtractor {
             "https://www.youtube.com/s/player/%s/player_ias.vflset/en_GB/base.js";
     private static final Pattern IFRAME_RES_JS_BASE_PLAYER_HASH_PATTERN = Pattern.compile(
             "player\\\\/([a-z0-9]{8})\\\\/");
+    // "jsUrl" in the page's ytcfg. YouTube renamed the player variant from
+    // player_ias to player_es6 / player_embed_es6 (2026); match ANY player*
+    // variant so this (and future renames) don't re-break extraction. Shared by
+    // the embed-page and watch-page sources (both carry the same "jsUrl" field).
     private static final Pattern EMBEDDED_WATCH_PAGE_JS_BASE_PLAYER_URL_PATTERN = Pattern.compile(
-            "\"jsUrl\":\"(/s/player/[A-Za-z0-9]+/player_ias\\.vflset/[A-Za-z_-]+/base\\.js)\"");
+            "\"jsUrl\":\"(/s/player/[A-Za-z0-9]+/player[A-Za-z0-9_]*\\.vflset/[A-Za-z_-]+/base\\.js)\"");
 
     private YoutubeJavaScriptExtractor() {
     }
@@ -62,18 +66,28 @@ final class YoutubeJavaScriptExtractor {
 
             return YoutubeJavaScriptExtractor.downloadJavaScriptCode(playerJsUrl);
         } catch (final Exception e) {
-            url = YoutubeJavaScriptExtractor.extractJavaScriptUrlWithEmbedWatchPage(videoId);
-            final String playerJsUrl = YoutubeJavaScriptExtractor.cleanJavaScriptUrl(url);
-
             try {
-                // Assert that the URL we extracted and built is valid
+                url = YoutubeJavaScriptExtractor.extractJavaScriptUrlWithEmbedWatchPage(videoId);
+                final String playerJsUrl = YoutubeJavaScriptExtractor.cleanJavaScriptUrl(url);
                 new URL(playerJsUrl);
-            } catch (final MalformedURLException exception) {
-                throw new ParsingException(
-                        "The extracted and built JavaScript URL is invalid", exception);
+                return YoutubeJavaScriptExtractor.downloadJavaScriptCode(playerJsUrl);
+            } catch (final Exception e2) {
+                // Last resort: the regular watch page ALWAYS carries ytcfg.jsUrl,
+                // even for embedding-disabled videos whose /embed/ page is stripped
+                // of the player JS (= the case the iframe + embed sources can't
+                // cover). base.js is video-independent, so any watch page works;
+                // this is the source yt-dlp uses, hence the most reliable.
+                url = YoutubeJavaScriptExtractor.extractJavaScriptUrlWithWatchPage(videoId);
+                final String playerJsUrl = YoutubeJavaScriptExtractor.cleanJavaScriptUrl(url);
+                try {
+                    // Assert that the URL we extracted and built is valid
+                    new URL(playerJsUrl);
+                } catch (final MalformedURLException exception) {
+                    throw new ParsingException(
+                            "The extracted and built JavaScript URL is invalid", exception);
+                }
+                return YoutubeJavaScriptExtractor.downloadJavaScriptCode(playerJsUrl);
             }
-
-            return YoutubeJavaScriptExtractor.downloadJavaScriptCode(playerJsUrl);
         }
     }
 
@@ -133,6 +147,34 @@ final class YoutubeJavaScriptExtractor {
         } catch (final Parser.RegexException e) {
             throw new ParsingException(
                     "Embedded watch page didn't provide JavaScript base player's URL", e);
+        }
+    }
+
+    /**
+     * Extracts the base.js URL from a regular watch page. Unlike the /embed/ page
+     * (which is stripped of the player JS for embedding-disabled videos — e.g.
+     * many public-broadcaster uploads), the watch page always carries
+     * {@code ytcfg.jsUrl}, so this is the most reliable source and the one yt-dlp
+     * uses. Reuses the shared "jsUrl" pattern (variant-agnostic).
+     */
+    @Nonnull
+    static String extractJavaScriptUrlWithWatchPage(@Nonnull final String videoId)
+            throws ParsingException {
+        final String watchPageContent;
+        try {
+            watchPageContent = NewPipe.getDownloader()
+                    .get("https://www.youtube.com/watch?v=" + videoId, Localization.DEFAULT)
+                    .responseBody();
+        } catch (final Exception e) {
+            throw new ParsingException("Could not fetch watch page", e);
+        }
+
+        try {
+            return Parser.matchGroup1(
+                    EMBEDDED_WATCH_PAGE_JS_BASE_PLAYER_URL_PATTERN, watchPageContent);
+        } catch (final Parser.RegexException e) {
+            throw new ParsingException(
+                    "Watch page didn't provide JavaScript base player's URL", e);
         }
     }
 
