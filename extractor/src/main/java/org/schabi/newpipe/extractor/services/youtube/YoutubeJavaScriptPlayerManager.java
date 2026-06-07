@@ -30,7 +30,16 @@ import java.util.Objects;
 public final class YoutubeJavaScriptPlayerManager {
 
     @Nonnull
-    private static final Map<String, String> CACHED_THROTTLING_PARAMETERS = new HashMap<>();
+    private static final Map<String, String> CACHED_THROTTLING_PARAMETERS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    // Reused across all sidecar decrypt calls. Creating a fresh HttpClient per call
+    // (the old code did) spins up a new selector/thread pool + a new TCP connection
+    // every time — the dominant cost when ~15-20 stream URLs each need an nsig/sig
+    // decrypt during one resolve. One pooled client => keep-alive, no per-call setup.
+    private static final java.net.http.HttpClient NSIG_HTTP = java.net.http.HttpClient.newBuilder()
+            .connectTimeout(java.time.Duration.ofSeconds(2))
+            .build();
 
     private static String cachedJavaScriptPlayerCode;
 
@@ -141,7 +150,7 @@ public final class YoutubeJavaScriptPlayerManager {
         if (sidecarUrl != null && !sidecarUrl.isEmpty()) {
             try {
                 final String sigUrl = sidecarUrl.replace("/decrypt_n", "/decrypt_sig");
-                final java.net.http.HttpClient hc = java.net.http.HttpClient.newHttpClient();
+                final java.net.http.HttpClient hc = NSIG_HTTP;
                 final String body = "{\"sig\":\"" + obfuscatedSignature.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
                 final java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
                         .uri(java.net.URI.create(sigUrl))
@@ -149,7 +158,9 @@ public final class YoutubeJavaScriptPlayerManager {
                         .header("Content-Type", "application/json")
                         .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
                         .build();
+                final long _t0 = System.currentTimeMillis();
                 final java.net.http.HttpResponse<String> resp = hc.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+                System.out.println("[NPE/nsig-time] sidecar call " + (System.currentTimeMillis() - _t0) + "ms");
                 if (resp.statusCode() == 200) {
                     final java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"sig\"\\s*:\\s*\"([^\"]+)\"").matcher(resp.body());
                     if (m.find()) {
@@ -262,7 +273,7 @@ public final class YoutubeJavaScriptPlayerManager {
         final String _sidecarUrl = System.getenv("NSIG_DECODER_URL");
         if (_sidecarUrl != null && !_sidecarUrl.isEmpty()) {
             try {
-                final java.net.http.HttpClient hc = java.net.http.HttpClient.newHttpClient();
+                final java.net.http.HttpClient hc = NSIG_HTTP;
                 final String body = "{\"n\":\"" + obfuscatedThrottlingParameter.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
                 final java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
                         .uri(java.net.URI.create(_sidecarUrl))
@@ -270,7 +281,9 @@ public final class YoutubeJavaScriptPlayerManager {
                         .header("Content-Type", "application/json")
                         .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
                         .build();
+                final long _t0 = System.currentTimeMillis();
                 final java.net.http.HttpResponse<String> resp = hc.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+                System.out.println("[NPE/nsig-time] sidecar call " + (System.currentTimeMillis() - _t0) + "ms");
                 if (resp.statusCode() == 200) {
                     final java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"n\"\\s*:\\s*\"([^\"]+)\"").matcher(resp.body());
                     if (m.find()) {

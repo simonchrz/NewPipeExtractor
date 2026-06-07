@@ -120,6 +120,14 @@ public class YoutubeStreamExtractor extends StreamExtractor {
     public static final ThreadLocal<Boolean> FORCE_WEB_EMBED_FOR_THREAD =
         ThreadLocal.withInitial(() -> Boolean.FALSE);
 
+    // When set (StreamHandlers' /streams?light=1), skip the /next innertube call
+    // (related videos + chapters + metaInfo) — the dominant resolve cost (~900ms)
+    // that the cold-tap playback path does not need. ageLimit stays correct because
+    // getAgeLimit() prefers the microformat isFamilySafe signal (from the web
+    // metadata call, which IS kept), not the /next secondary-info renderer.
+    public static final ThreadLocal<Boolean> SKIP_NEXT_FOR_THREAD =
+        ThreadLocal.withInitial(() -> Boolean.FALSE);
+
     private static final String ADAPTIVE_FORMATS = "adaptiveFormats";
     private static final String STREAMING_DATA = "streamingData";
     private static final String NEXT = "next";
@@ -320,6 +328,22 @@ public class YoutubeStreamExtractor extends StreamExtractor {
             return ageLimit;
         }
 
+        // Primary signal: microformat isFamilySafe, from the web metadata call (kept
+        // even in the /next-skipping light path). isFamilySafe=false => age/maturity
+        // restricted. This keeps the kids' FSK block working WITHOUT the /next call.
+        final boolean familySafePresent = playerMicroFormatRenderer != null
+                && playerMicroFormatRenderer.has("isFamilySafe");
+        System.out.println("[NPE-age] " + getId() + " isFamilySafe present=" + familySafePresent
+                + " value=" + (familySafePresent
+                        ? playerMicroFormatRenderer.getBoolean("isFamilySafe", true) : "n/a"));
+        if (familySafePresent
+                && !playerMicroFormatRenderer.getBoolean("isFamilySafe", true)) {
+            ageLimit = 18;
+            return ageLimit;
+        }
+
+        // Fallback: "Age-restricted" row in the /next secondary-info renderer
+        // (empty in the light path -> no match -> NO_AGE_LIMIT).
         final boolean ageRestricted = getVideoSecondaryInfoRenderer()
                 .getObject("metadataRowContainer")
                 .getObject("metadataRowContainerRenderer")
@@ -878,6 +902,28 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // to the WebEmbed auto-fallback -- so WebEmbed kicks in automatically and
         // fast WITHOUT the env flag. Abandoned worker threads are bounded by the
         // Downloader's 10s read timeout, so the pool can't accumulate them forever.
+        // Kick off /next (related videos, chapters, metaInfo) NOW, parallel to the
+        // Android cascade + metadata below. It's the dominant resolve cost (~800ms,
+        // measured) but depends only on videoId — nothing in the player cascade — so
+        // overlapping it instead of running it last collapses the resolve wall time
+        // to ~max(next, the rest). Joined where nextResponse is assigned.
+        final byte[] nextBody = JsonWriter.string(
+                prepareDesktopJsonBuilder(localization, contentCountry)
+                        .value(VIDEO_ID, videoId)
+                        .value(CONTENT_CHECK_OK, true)
+                        .value(RACY_CHECK_OK, true)
+                        .done())
+                .getBytes(StandardCharsets.UTF_8);
+        final boolean skipNext = Boolean.TRUE.equals(SKIP_NEXT_FOR_THREAD.get());
+        final CompletableFuture<JsonObject> nextFuture = skipNext ? null
+                : CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return getJsonPostResponse(NEXT, nextBody, localization);
+                    } catch (final Exception e) {
+                        throw new java.util.concurrent.CompletionException(e);
+                    }
+                });
+
         boolean androidOk = false;
         if (!enableWebEmbedModern) {
             try {
@@ -885,10 +931,76 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                     try {
                         final PoTokenResult androidPoTokenResult = noPoTokenProviderSet ? null
                                 : poTokenProviderInstance.getAndroidClientPoToken(videoId);
-                        // ANDROID_VR first: bypasses googlevideo CDN throttling, no
-                        // PoToken. Swallows its own exceptions (state -> null).
-                        fetchAndroidVrClient(localization, contentCountry, videoId);
-                        fetchAndroidClient(localization, contentCountry, videoId, androidPoTokenResult);
+                        // ANDROID_VR + ANDROID are two independent innertube player
+                        // calls (~600ms each). Run the NETWORK fetches in parallel;
+                        // the shared-field assignments below run sequentially in THIS
+                        // thread in the original order (VR fills if-null, ANDROID
+                        // overwrites + is authoritative for playability), so the end
+                        // state is identical to the old sequential version — just
+                        // ~600ms faster. VR bypasses googlevideo CDN throttling (no
+                        // PoToken) and is best-effort; ANDROID failures throw (caught
+                        // below -> FALSE, VR data + WebEmbed fallback still cover it).
+                        final CompletableFuture<JsonObject> vrFuture =
+                                CompletableFuture.supplyAsync(() -> {
+                                    final long s = System.currentTimeMillis();
+                                    final JsonObject r = fetchAndroidVrClientData(localization, contentCountry, videoId);
+                                    System.out.println("[NPE-timing] " + videoId + " VR fetch "
+                                            + (System.currentTimeMillis() - s) + "ms ok=" + (r != null));
+                                    return r;
+                                });
+                        final CompletableFuture<JsonObject> androidFuture =
+                                CompletableFuture.supplyAsync(() -> {
+                                    final long s = System.currentTimeMillis();
+                                    try {
+                                        final JsonObject r = fetchAndroidClientData(localization, contentCountry,
+                                                videoId, androidPoTokenResult);
+                                        System.out.println("[NPE-timing] " + videoId + " ANDROID fetch "
+                                                + (System.currentTimeMillis() - s) + "ms ok=true");
+                                        return r;
+                                    } catch (final Exception e) {
+                                        System.out.println("[NPE-timing] " + videoId + " ANDROID fetch FAILED "
+                                                + (System.currentTimeMillis() - s) + "ms: " + e.getMessage());
+                                        throw new java.util.concurrent.CompletionException(e);
+                                    }
+                                });
+
+                        // VR first (best-effort), exactly as before.
+                        JsonObject vrResp;
+                        try { vrResp = vrFuture.join(); } catch (final Exception ignored) { vrResp = null; }
+                        if (vrResp != null) {
+                            androidVrStreamingData = vrResp.getObject(STREAMING_DATA);
+                            if (playerResponse == null) {
+                                playerResponse = vrResp;
+                            }
+                            if (isNullOrEmpty(playerCaptionsTracklistRenderer)) {
+                                playerCaptionsTracklistRenderer = vrResp.getObject(CAPTIONS)
+                                        .getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER);
+                            }
+                        }
+
+                        // ANDROID second (authoritative); unwrap the parallel exception
+                        // so the original throw semantics (IO/Extraction/playability)
+                        // are preserved and caught by the outer handler below.
+                        final JsonObject androidResp;
+                        try {
+                            androidResp = androidFuture.join();
+                        } catch (final java.util.concurrent.CompletionException ce) {
+                            final Throwable cause = ce.getCause();
+                            if (cause instanceof IOException) throw (IOException) cause;
+                            if (cause instanceof ExtractionException) throw (ExtractionException) cause;
+                            throw new ExtractionException(cause == null ? ce : cause);
+                        }
+                        checkPlayabilityStatus(androidResp.getObject(PLAYABILITY_STATUS));
+                        if (isPlayerResponseNotValid(androidResp, videoId)) {
+                            throw new ExtractionException("ANDROID player response is not valid");
+                        }
+                        androidStreamingData = androidResp.getObject(STREAMING_DATA);
+                        playerResponse = androidResp;
+                        playerCaptionsTracklistRenderer = androidResp.getObject(CAPTIONS)
+                                .getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER);
+                        if (androidPoTokenResult != null) {
+                            androidStreamingUrlsPoToken = androidPoTokenResult.streamingDataPoToken;
+                        }
                         return Boolean.TRUE;
                     } catch (final Exception eAndroid) {
                         // Any failure -- SignInConfirmNotBotException, IOException
@@ -1028,16 +1140,29 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                 "YouTube probably temporarily blocked anonymous watch access with this IP");
         }
 
+        final long _tMeta = System.currentTimeMillis();
         fetchWebClientMetadataAndSetThumbnails(localization, contentCountry, videoId);
+        System.out.println("[NPE-timing] " + videoId + " webMetadata "
+                + (System.currentTimeMillis() - _tMeta) + "ms");
 
-        final byte[] nextBody = JsonWriter.string(
-                prepareDesktopJsonBuilder(localization, contentCountry)
-                        .value(VIDEO_ID, videoId)
-                        .value(CONTENT_CHECK_OK, true)
-                        .value(RACY_CHECK_OK, true)
-                        .done())
-                .getBytes(StandardCharsets.UTF_8);
-        nextResponse = getJsonPostResponse(NEXT, nextBody, localization);
+        if (nextFuture == null) {
+            // light path: /next skipped -> empty object keeps the getRelatedItems /
+            // getStreamSegments / getMetaInfo / secondary-info readers null-safe.
+            nextResponse = new JsonObject();
+            System.out.println("[NPE-timing] " + videoId + " next SKIPPED (light path)");
+        } else {
+            final long _tJoin = System.currentTimeMillis();
+            try {
+                nextResponse = nextFuture.join();
+            } catch (final java.util.concurrent.CompletionException ce) {
+                final Throwable cause = ce.getCause();
+                if (cause instanceof IOException) throw (IOException) cause;
+                if (cause instanceof ExtractionException) throw (ExtractionException) cause;
+                throw new ExtractionException(cause == null ? ce : cause);
+            }
+            System.out.println("[NPE-timing] " + videoId + " next-join "
+                    + (System.currentTimeMillis() - _tJoin) + "ms (blocked; ran parallel to cascade)");
+        }
     }
 
 
@@ -1108,57 +1233,38 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         throw new ContentNotAvailableException("Got error " + status + ": \"" + reason + "\"");
     }
 
-    private void fetchAndroidClient(@Nonnull final Localization localization,
-                                    @Nonnull final ContentCountry contentCountry,
-                                    @Nonnull final String videoId,
-                                    @Nullable final PoTokenResult androidPoTokenResult)
+    // Network-only twin: fetch the ANDROID player response and return it. Sets only
+    // its own cpn; all shared-field assignment + the playability check are done by
+    // the caller, so this can run in parallel with the VR fetch without racing.
+    private JsonObject fetchAndroidClientData(@Nonnull final Localization localization,
+                                              @Nonnull final ContentCountry contentCountry,
+                                              @Nonnull final String videoId,
+                                              @Nullable final PoTokenResult androidPoTokenResult)
             throws IOException, ExtractionException {
         androidCpn = generateContentPlaybackNonce();
-
         if (androidPoTokenResult == null) {
-            playerResponse = YoutubeStreamHelper.getAndroidReelPlayerResponse(
+            return YoutubeStreamHelper.getAndroidReelPlayerResponse(
                     contentCountry, localization, videoId, androidCpn);
-        } else {
-            playerResponse = YoutubeStreamHelper.getAndroidPlayerResponse(
-                    contentCountry, localization, videoId, androidCpn,
-                    androidPoTokenResult);
         }
-
-        checkPlayabilityStatus(playerResponse.getObject(PLAYABILITY_STATUS));
-        if (isPlayerResponseNotValid(playerResponse, videoId)) {
-            throw new ExtractionException("ANDROID player response is not valid");
-        }
-
-        androidStreamingData = playerResponse.getObject(STREAMING_DATA);
-
-        playerCaptionsTracklistRenderer = playerResponse.getObject(CAPTIONS)
-                .getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER);
-
-        if (androidPoTokenResult != null) {
-            androidStreamingUrlsPoToken = androidPoTokenResult.streamingDataPoToken;
-        }
+        return YoutubeStreamHelper.getAndroidPlayerResponse(
+                contentCountry, localization, videoId, androidCpn, androidPoTokenResult);
     }
 
-    private void fetchAndroidVrClient(@Nonnull final Localization localization,
-                                      @Nonnull final ContentCountry contentCountry,
-                                      @Nonnull final String videoId) {
+    // Network-only twin: fetch the ANDROID_VR player response and return it (or null
+    // if invalid/failed — VR is best-effort). Sets only its own cpn; shared-field
+    // assignment is done by the caller.
+    private JsonObject fetchAndroidVrClientData(@Nonnull final Localization localization,
+                                                @Nonnull final ContentCountry contentCountry,
+                                                @Nonnull final String videoId) {
         try {
             androidVrCpn = generateContentPlaybackNonce();
             final JsonObject vrPlayerResponse =
                     YoutubeStreamHelper.getAndroidVrPlayerResponse(
                             contentCountry, localization, videoId, androidVrCpn);
-            if (!isPlayerResponseNotValid(vrPlayerResponse, videoId)) {
-                androidVrStreamingData = vrPlayerResponse.getObject(STREAMING_DATA);
-                if (playerResponse == null) {
-                    playerResponse = vrPlayerResponse;
-                }
-                if (isNullOrEmpty(playerCaptionsTracklistRenderer)) {
-                    playerCaptionsTracklistRenderer = vrPlayerResponse.getObject(CAPTIONS)
-                            .getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER);
-                }
-            }
+            return isPlayerResponseNotValid(vrPlayerResponse, videoId) ? null : vrPlayerResponse;
         } catch (final Exception ignored) {
             // VR client is best-effort; failures fall through to Android/iOS/WebEmbed.
+            return null;
         }
     }
 
