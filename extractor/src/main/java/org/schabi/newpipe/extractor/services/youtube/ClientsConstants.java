@@ -126,4 +126,18 @@ final class ClientsConstants {
     public static final String ANDROID_VR_USER_AGENT =
             "com.google.android.apps.youtube.vr.oculus/" + ANDROID_VR_CLIENT_VERSION
                     + " (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
+
+    // TVHTML5_SIMPLY_EMBEDDED_PLAYER (the "tv_embedded" client). Added
+    // 2026-06-09 as an audio0 fallback: Nickelodeon/SpongeBob-style videos
+    // return no audio on ANDROID/ANDROID_VR and the WEB_EMBEDDED fallback is
+    // now 403'd by googlevideo. The plain TVHTML5 (WATCH) client is bot-gated
+    // (LOGIN_REQUIRED), but the EMBED-screen variant serves direct,
+    // poToken-free stream URLs. Verified seg-206 on the audio0 SpongeBob
+    // videos via yt-dlp (player_client=tv_embedded).
+    public static final String TVHTML5_CLIENT_ID = "7";
+    public static final String TVHTML5_CLIENT_NAME = "TVHTML5";
+    public static final String TVHTML5_CLIENT_VERSION = "7.20260114.12.00";
+    public static final String TVHTML5_USER_AGENT =
+            "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold "
+                    + "(unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)";
 }

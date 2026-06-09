@@ -351,6 +351,213 @@ public final class YoutubeStreamHelper {
                 getDownloader().postWithContentTypeJson(url, headers, body, localization)));
     }
 
+    // Custom 2026-06-09: TVHTML5 (TV/Cobalt) client. poToken-free fallback for
+    // audio0 videos where ANDROID/VR have no audio and WEB_EMBEDDED is 403'd.
+    // Web-family (needs signatureTimestamp + downstream sig/nsig descramble),
+    // modelled on getWebEmbeddedPlayerResponse but WATCH screen + Cobalt UA.
+    // Authenticated TVHTML5 (TV/Cobalt) player response. The TV client is
+    // bot-walled (LOGIN_REQUIRED) unless the request carries a real signed-in
+    // session, so we scrape youtube.com/tv (the downloader attaches the account
+    // cookies) for its ytcfg, build the full TV context from those fields, and
+    // let the downloader add the SAPISIDHASH Authorization. The user session id
+    // for that auth is handed to the downloader via the private
+    // X-Yt-Auth-Session header (consumed + stripped there). Modelled on
+    // getWebEmbeddedPlayerResponseModern + yt-dlp's tv client.
+    public static JsonObject getTvHtml5PlayerResponse(
+            @Nonnull final Localization localization,
+            @Nonnull final ContentCountry contentCountry,
+            @Nonnull final String videoId,
+            @Nonnull final String cpn,
+            final int signatureTimestamp) throws IOException, ExtractionException {
+        final TvCfg cfg = getTvCfg(localization);
+        if (cfg == null || cfg.visitorData == null || cfg.clientVersion == null) {
+            throw new ExtractionException("TVHTML5: /tv ytcfg scrape missing required fields "
+                    + "(visitorData/clientVersion) -- account not signed in?");
+        }
+
+        final String cobaltUa = ClientsConstants.TVHTML5_USER_AGENT + ",gzip(gfe)";
+        final String gl = contentCountry.getCountryCode();
+        final String hl = localization.getLanguageCode();
+
+        final StringBuilder b = new StringBuilder(4096);
+        b.append('{');
+        b.append("\"context\":{\"client\":{");
+        b.append("\"hl\":\"").append(jsonEscape(hl)).append("\",");
+        b.append("\"gl\":\"").append(jsonEscape(gl)).append("\",");
+        b.append("\"deviceMake\":\"Unknown\",\"deviceModel\":\"Unknown\",");
+        b.append("\"visitorData\":\"").append(jsonEscape(cfg.visitorData)).append("\",");
+        b.append("\"userAgent\":\"").append(jsonEscape(cobaltUa)).append("\",");
+        b.append("\"clientName\":\"TVHTML5\",");
+        b.append("\"clientVersion\":\"").append(jsonEscape(cfg.clientVersion)).append("\",");
+        b.append("\"osName\":\"Unknown_0\",\"osVersion\":\"\",");
+        b.append("\"originalUrl\":\"https://www.youtube.com/tv\",");
+        b.append("\"theme\":\"CLASSIC\",\"platform\":\"TV\",");
+        b.append("\"clientFormFactor\":\"UNKNOWN_FORM_FACTOR\",\"webpSupport\":false,");
+        if (cfg.appInstallData != null) {
+            b.append("\"configInfo\":{\"appInstallData\":\"")
+                    .append(jsonEscape(cfg.appInstallData)).append("\"},");
+        }
+        b.append("\"tvAppInfo\":{\"appQuality\":\"TV_APP_QUALITY_FULL_ANIMATION\",");
+        b.append("\"systemIntegrator\":\"unknown\",");
+        b.append("\"releaseVehicle\":\"COBALT_RELEASE_VEHICLE_LEGACY_THIRD_PARTY\"},");
+        b.append("\"timeZone\":\"UTC\",\"browserName\":\"Cobalt\",");
+        b.append("\"browserVersion\":\"25.lts.30.1034943-gold\",");
+        b.append("\"platformDetail\":\"PLATFORM_DETAIL_TV\",\"chipset\":\"unknown_0\",");
+        b.append("\"acceptHeader\":\"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\",");
+        if (cfg.deviceExperimentId != null) {
+            b.append("\"deviceExperimentId\":\"")
+                    .append(jsonEscape(cfg.deviceExperimentId)).append("\",");
+        }
+        if (cfg.rolloutToken != null) {
+            b.append("\"rolloutToken\":\"")
+                    .append(jsonEscape(cfg.rolloutToken)).append("\",");
+        }
+        b.append("\"utcOffsetMinutes\":0");
+        b.append("},");
+        b.append("\"user\":{\"lockedSafetyMode\":false},");
+        b.append("\"request\":{\"useSsl\":true}");
+        b.append("},");
+        b.append("\"videoId\":\"").append(jsonEscape(videoId)).append("\",");
+        b.append("\"playbackContext\":{\"contentPlaybackContext\":{");
+        b.append("\"html5Preference\":\"HTML5_PREF_WANTS\",");
+        b.append("\"signatureTimestamp\":").append(signatureTimestamp);
+        b.append("}},");
+        b.append("\"contentCheckOk\":true,\"racyCheckOk\":true");
+        b.append('}');
+
+        final Map<String, List<String>> postHeaders = new HashMap<>();
+        postHeaders.put("User-Agent", List.of(cobaltUa));
+        postHeaders.put("Content-Type", List.of("application/json"));
+        postHeaders.put("Origin", List.of("https://www.youtube.com"));
+        postHeaders.put("X-Youtube-Client-Name", List.of(ClientsConstants.TVHTML5_CLIENT_ID));
+        postHeaders.put("X-Youtube-Client-Version", List.of(cfg.clientVersion));
+        postHeaders.put("X-Goog-Visitor-Id", List.of(cfg.visitorData));
+        postHeaders.put("X-Youtube-Bootstrap-Logged-In", List.of("true"));
+        if (cfg.userSessionId != null) {
+            postHeaders.put("X-Yt-Auth-Session", List.of(cfg.userSessionId));
+        }
+
+        final byte[] body = b.toString().getBytes(StandardCharsets.UTF_8);
+        final String url = YOUTUBEI_V1_URL + PLAYER + "?" + DISABLE_PRETTY_PRINT_PARAMETER;
+        return JsonUtils.toJsonObject(getValidJsonResponseBody(
+                getDownloader().postWithContentTypeJson(url, postHeaders, body, localization)));
+    }
+
+    // ---- youtube.com/tv ytcfg scrape + cache (for the authenticated TV client) ----
+    private static volatile TvCfg tvCfgCache;
+    private static volatile long tvCfgFetchedAt;
+    private static final long TVCFG_TTL_MS = 30L * 60 * 1000;
+
+    private static final class TvCfg {
+        String visitorData;
+        String clientVersion;
+        String appInstallData;
+        String rolloutToken;
+        String deviceExperimentId;
+        String userSessionId;
+    }
+
+    private static synchronized TvCfg getTvCfg(final Localization localization) {
+        final long now = System.currentTimeMillis();
+        if (tvCfgCache != null && (now - tvCfgFetchedAt) < TVCFG_TTL_MS) {
+            return tvCfgCache;
+        }
+        try {
+            // Fetch /tv directly via HttpURLConnection (NOT the reqwest4j downloader,
+            // which requests brotli but doesn't decode it -> garbled body) with
+            // Accept-Encoding: identity and the account cookies read from the same
+            // file the downloader uses. Needs the full signed-in page for the ytcfg.
+            final String html = fetchTvPage();
+            final TvCfg c = new TvCfg();
+            c.visitorData = extractEmbedField(html, "visitorData");
+            c.clientVersion = extractEmbedField(html, "INNERTUBE_CONTEXT_CLIENT_VERSION");
+            c.appInstallData = extractEmbedField(html, "appInstallData");
+            c.rolloutToken = extractEmbedField(html, "rolloutToken");
+            c.deviceExperimentId = extractEmbedField(html, "DEVICE_EXPERIMENT_ID");
+            c.userSessionId = extractEmbedField(html, "USER_SESSION_ID");
+            if (c.userSessionId == null) {
+                final String dsid = extractEmbedField(html, "DATASYNC_ID");
+                if (dsid != null && dsid.contains("||")) {
+                    c.userSessionId = dsid.substring(0, dsid.indexOf("||"));
+                }
+            }
+            System.out.println("[NPE/TvHtml5] /tv ytcfg vd=" + (c.visitorData != null)
+                    + " cv=" + c.clientVersion + " aid=" + (c.appInstallData != null)
+                    + " rt=" + (c.rolloutToken != null) + " deid=" + (c.deviceExperimentId != null)
+                    + " usid=" + (c.userSessionId != null));
+            if (c.visitorData != null && c.clientVersion != null) {
+                tvCfgCache = c;
+                tvCfgFetchedAt = now;
+            }
+            return c;
+        } catch (final Exception e) {
+            System.out.println("[NPE/TvHtml5] /tv ytcfg scrape failed: " + e.getMessage());
+            return tvCfgCache;
+        }
+    }
+
+    private static volatile String tvCookieHeader;
+    private static volatile boolean tvCookieLoaded;
+
+    private static String tvCookies() {
+        if (tvCookieLoaded) return tvCookieHeader;
+        tvCookieLoaded = true;
+        String path = System.getenv("YOUTUBE_COOKIES_FILE");
+        if (path == null || path.isEmpty()) path = "/app/youtube-cookies.txt";
+        final java.io.File f = new java.io.File(path);
+        if (!f.exists()) return null;
+        final StringBuilder sb = new StringBuilder();
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                final String[] p = line.split("\\t");
+                if (p.length < 7) continue;
+                // Only youtube-domain cookies. The file also holds .google.com
+                // cookies (SID/SAPISID with DIFFERENT values); sending both yields
+                // a duplicate SID= and YouTube falls back to the login page. curl's
+                // -b domain-filters; mimic that here.
+                if (!p[0].contains("youtube.com")) continue;
+                if (sb.length() > 0) sb.append("; ");
+                sb.append(p[5]).append('=').append(p[6]);
+            }
+        } catch (final Exception e) {
+            return null;
+        }
+        tvCookieHeader = sb.length() == 0 ? null : sb.toString();
+        return tvCookieHeader;
+    }
+
+    private static String fetchTvPage() throws IOException {
+        final java.net.HttpURLConnection conn =
+                (java.net.HttpURLConnection) new java.net.URL("https://www.youtube.com/tv").openConnection();
+        conn.setRequestMethod("GET");
+        conn.setInstanceFollowRedirects(true);
+        conn.setConnectTimeout(8000);
+        conn.setReadTimeout(15000);
+        conn.setRequestProperty("User-Agent", ClientsConstants.TVHTML5_USER_AGENT);
+        conn.setRequestProperty("Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        conn.setRequestProperty("Accept-Language", "en-us,en;q=0.5");
+        conn.setRequestProperty("Accept-Encoding", "gzip");
+        final String cookies = tvCookies();
+        if (cookies != null) conn.setRequestProperty("Cookie", cookies);
+        try {
+            // Manual Accept-Encoding disables HttpURLConnection's transparent
+            // gunzip, so decode by Content-Encoding ourselves. (identity gave a
+            // compressed body anyway; request gzip, which we can decode -- JDK
+            // has no brotli.)
+            final String enc = conn.getContentEncoding();
+            java.io.InputStream raw = conn.getInputStream();
+            final java.io.InputStream is = "gzip".equalsIgnoreCase(enc)
+                    ? new java.util.zip.GZIPInputStream(raw) : raw;
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        } finally {
+            conn.disconnect();
+        }
+    }
+
     public static JsonObject getIosPlayerResponse(@Nonnull final ContentCountry contentCountry,
                                                   @Nonnull final Localization localization,
                                                   @Nonnull final String videoId,

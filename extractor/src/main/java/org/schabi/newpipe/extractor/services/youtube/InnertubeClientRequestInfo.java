@@ -158,4 +158,16 @@ public final class InnertubeClientRequestInfo {
                         ClientsConstants.ANDROID_VR_OS_VERSION,
                         ClientsConstants.ANDROID_VR_SDK));
     }
+
+    @Nonnull
+    public static InnertubeClientRequestInfo ofTvHtml5Client() {
+        return new InnertubeClientRequestInfo(
+                new InnertubeClientRequestInfo.ClientInfo(
+                        ClientsConstants.TVHTML5_CLIENT_NAME,
+                        ClientsConstants.TVHTML5_CLIENT_VERSION,
+                        ClientsConstants.TVHTML5_CLIENT_ID,
+                        WATCH_CLIENT_SCREEN, null),
+                new InnertubeClientRequestInfo.DeviceInfo(null, null, null,
+                        null, null, -1));
+    }
 }

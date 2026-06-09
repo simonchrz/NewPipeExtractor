@@ -120,6 +120,15 @@ public class YoutubeStreamExtractor extends StreamExtractor {
     public static final ThreadLocal<Boolean> FORCE_WEB_EMBED_FOR_THREAD =
         ThreadLocal.withInitial(() -> Boolean.FALSE);
 
+    /**
+     * Like {@link #FORCE_WEB_EMBED_FOR_THREAD} but routes to the TVHTML5 (TV/
+     * Cobalt) client instead. Set by StreamHandlers for audio0 videos where
+     * WEB_EMBEDDED is now 403'd by googlevideo — TVHTML5 serves poToken-free,
+     * non-SABR stream URLs. ThreadLocal.remove() in the finally block essential.
+     */
+    public static final ThreadLocal<Boolean> FORCE_TVHTML5_FOR_THREAD =
+        ThreadLocal.withInitial(() -> Boolean.FALSE);
+
     // When set (StreamHandlers' /streams?light=1), skip the /next innertube call
     // (related videos + chapters + metaInfo) — the dominant resolve cost (~900ms)
     // that the cold-tap playback path does not need. ageLimit stays correct because
@@ -157,6 +166,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
     private JsonObject webEmbedStreamingData;
     @Nullable
     private JsonObject androidVrStreamingData;
+    @Nullable
+    private JsonObject tvHtml5StreamingData;
 
     private JsonObject videoPrimaryInfoRenderer;
     private JsonObject videoSecondaryInfoRenderer;
@@ -174,6 +185,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
     private String androidCpn;
     private String webEmbedCpn;
     private String androidVrCpn;
+    private String tvHtml5Cpn;
 
     @Nullable
     private String androidStreamingUrlsPoToken;
@@ -892,6 +904,10 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // env or per-thread FORCE flag (StreamHandlers' 403-throttle detection).
         final boolean enableWebEmbedModern = "1".equals(System.getenv("ENABLE_WEB_EMBED_MODERN"))
                 || Boolean.TRUE.equals(FORCE_WEB_EMBED_FOR_THREAD.get());
+        // TVHTML5 forced (audio0 fallback): skip the Android cascade and resolve
+        // directly via the TV client (poToken-free, non-403). Takes precedence
+        // over WebEmbed when both are set.
+        final boolean enableTvHtml5 = Boolean.TRUE.equals(FORCE_TVHTML5_FOR_THREAD.get());
 
         // Android acquisition (PoToken mint + ANDROID_VR + ANDROID) under a
         // bounded wait. Under a googlevideo per-IP throttle these requests don't
@@ -925,7 +941,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                 });
 
         boolean androidOk = false;
-        if (!enableWebEmbedModern) {
+        if (!enableWebEmbedModern && !enableTvHtml5) {
             try {
                 androidOk = CompletableFuture.supplyAsync(() -> {
                     try {
@@ -1016,6 +1032,44 @@ public class YoutubeStreamExtractor extends StreamExtractor {
             } catch (final Exception eAndroidOuter) {
                 System.out.println("[NPE] Android cascade failed ("
                         + eAndroidOuter.getClass().getSimpleName() + ") -- auto-WebEmbed fallback");
+            }
+        }
+
+        // TVHTML5 forced path (audio0 fallback) — runs before WebEmbed so it
+        // takes precedence. poToken-free TV client; URLs are sig/nsig-descrambled
+        // downstream like the other web-family clients.
+        if (enableTvHtml5) {
+            try {
+                tvHtml5Cpn = generateContentPlaybackNonce();
+                final int sts = YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId);
+                final JsonObject tvResp = YoutubeStreamHelper.getTvHtml5PlayerResponse(
+                        localization, contentCountry, videoId, tvHtml5Cpn, sts == 0 ? 0 : sts);
+                if (!isPlayerResponseNotValid(tvResp, videoId)) {
+                    tvHtml5StreamingData = tvResp.getObject(STREAMING_DATA);
+                    if (playerResponse == null) {
+                        playerResponse = tvResp;
+                    }
+                    System.out.println("[NPE/TvHtml5] " + videoId + " streamingData has "
+                            + (tvHtml5StreamingData != null ? "data" : "NO data"));
+                    if (isNullOrEmpty(playerCaptionsTracklistRenderer)) {
+                        playerCaptionsTracklistRenderer = tvResp.getObject(CAPTIONS)
+                                .getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER);
+                    }
+                } else {
+                    try {
+                        final JsonObject ps = tvResp.getObject(PLAYABILITY_STATUS);
+                        System.out.println("[NPE/TvHtml5] response not valid for " + videoId
+                                + " status=" + ps.getString("status")
+                                + " reason=" + ps.getString("reason")
+                                + " vd.videoId=" + tvResp.getObject(VIDEO_DETAILS).getString("videoId")
+                                + " topKeys=" + tvResp.keySet());
+                    } catch (final Exception eDiag) {
+                        System.out.println("[NPE/TvHtml5] response not valid for " + videoId
+                                + " (diag failed: " + eDiag.getMessage() + ") topKeys=" + tvResp.keySet());
+                    }
+                }
+            } catch (final Exception eTv) {
+                System.out.println("[NPE/TvHtml5] failed: " + eTv.getMessage());
             }
         }
 
@@ -1135,7 +1189,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         }
 
         if (!androidOk && iosStreamingData == null && androidVrStreamingData == null
-                && webEmbedStreamingData == null) {
+                && webEmbedStreamingData == null && tvHtml5StreamingData == null) {
             throw new SignInConfirmNotBotException(
                 "YouTube probably temporarily blocked anonymous watch access with this IP");
         }
@@ -1465,6 +1519,10 @@ public class YoutubeStreamExtractor extends StreamExtractor {
             // the other clients on many videos (no PoToken/Widevine required).
             // iOS next (cookies-consistent), Android as fallback, WebEmbed last.
             java.util.stream.Stream.of(
+                    // TVHTML5 first: only populated when forced for audio0, and
+                    // then it's the only source (poToken-free, non-403).
+                    new Pair<>(tvHtml5StreamingData,
+                            new Pair<>(tvHtml5Cpn, (String) null)),
                     new Pair<>(androidVrStreamingData,
                             new Pair<>(androidVrCpn, (String) null)),
                     new Pair<>(iosStreamingData,
