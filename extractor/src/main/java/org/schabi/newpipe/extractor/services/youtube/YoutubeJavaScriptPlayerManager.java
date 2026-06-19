@@ -299,8 +299,13 @@ public final class YoutubeJavaScriptPlayerManager {
             } catch (final ParsingException pe) {
                 throw pe;
             } catch (final Exception e) {
-                System.out.println("[NPE/n-sidecar] exception: " + e.getMessage());
-                throw new ParsingException("Sidecar nsig decrypt error: " + e.getMessage(), e);
+                // Log the exception CLASS, not just getMessage() — a bare
+                // getMessage() was null for the ConnectException that broke this
+                // for 8 days (preferIPv6 + IPv4-only sidecar), which told us nothing.
+                System.out.println("[NPE/n-sidecar] " + e.getClass().getSimpleName()
+                        + ": " + e.getMessage());
+                throw new ParsingException("Sidecar nsig decrypt error: "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
             }
         }
 

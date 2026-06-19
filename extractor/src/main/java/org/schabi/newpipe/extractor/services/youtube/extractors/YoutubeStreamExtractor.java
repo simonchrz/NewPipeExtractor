@@ -1695,6 +1695,11 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                                     itagItem.itagType, contentPlaybackNonce, poToken);
                         }
                     } catch (final Exception e) {
+                        // Was a silent empty catch — it hid a sidecar-connect bug for
+                        // 8 days (every format dropped -> "no playable streams"). Keep
+                        // a concise drop log so a future mass-drop is visible.
+                        System.out.println("[NPE/getItags-drop] " + videoId + " itag=" + itag
+                                + " " + e.getClass().getSimpleName() + ": " + e.getMessage());
                     }
                     return null;
                 })
