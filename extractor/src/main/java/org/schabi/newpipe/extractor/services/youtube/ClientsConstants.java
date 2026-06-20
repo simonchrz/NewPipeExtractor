@@ -140,4 +140,13 @@ final class ClientsConstants {
     public static final String TVHTML5_USER_AGENT =
             "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold "
                     + "(unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)";
+
+    // visionOS client fields
+
+    static final String VISIONOS_CLIENT_ID = "101";
+    static final String VISIONOS_CLIENT_NAME = "VISIONOS";
+    static final String VISIONOS_CLIENT_VERSION = "1.02";
+    static final String VISIONOS_DEVICE_MODEL = "RealityDevice14,1";
+    static final String VISIONOS_VERSION = "25.6.0.23O471";
+    static final String VISIONOS_USER_AGENT_VERSION = "25_6_0";
 }

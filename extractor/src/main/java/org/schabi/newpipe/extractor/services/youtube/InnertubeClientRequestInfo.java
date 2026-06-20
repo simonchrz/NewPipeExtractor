@@ -14,6 +14,11 @@ import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.IOS
 import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.IOS_DEVICE_MODEL;
 import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.IOS_OS_VERSION;
 import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.MOBILE_CLIENT_PLATFORM;
+import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.VISIONOS_CLIENT_ID;
+import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.VISIONOS_CLIENT_NAME;
+import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.VISIONOS_CLIENT_VERSION;
+import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.VISIONOS_DEVICE_MODEL;
+import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.VISIONOS_VERSION;
 import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.WATCH_CLIENT_SCREEN;
 import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.WEB_CLIENT_ID;
 import static org.schabi.newpipe.extractor.services.youtube.ClientsConstants.WEB_CLIENT_NAME;
@@ -169,5 +174,13 @@ public final class InnertubeClientRequestInfo {
                         WATCH_CLIENT_SCREEN, null),
                 new InnertubeClientRequestInfo.DeviceInfo(null, null, null,
                         null, null, -1));
+    }
+
+    public static InnertubeClientRequestInfo ofVisionOsClient() {
+        return new InnertubeClientRequestInfo(
+                new InnertubeClientRequestInfo.ClientInfo(VISIONOS_CLIENT_NAME,
+                        VISIONOS_CLIENT_VERSION, VISIONOS_CLIENT_ID, WATCH_CLIENT_SCREEN, null),
+                new InnertubeClientRequestInfo.DeviceInfo(MOBILE_CLIENT_PLATFORM, "Apple",
+                        VISIONOS_DEVICE_MODEL, "visionOS", VISIONOS_VERSION, -1));
     }
 }
