@@ -1089,6 +1089,28 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                 }
                 if (!isPlayerResponseNotValid(webEmbedResp, videoId)) {
                     webEmbedStreamingData = webEmbedResp.getObject(STREAMING_DATA);
+                    // EXPERIMENT 2026-06-20: WebEmbedModern's player request carries NO
+                    // streaming po_token, so its media URLs 403 when googlevideo
+                    // throttles them (isFamilySafe videos are forced onto this path).
+                    // Apply a CONTENT-BOUND (videoId) streaming pot from the provider
+                    // (BgPoTokenProvider.getWebEmbedClientPoToken mints it). Kill-switch
+                    // WEBEMBED_CONTENT_POT=0 — a wrong pot could 403 an otherwise-working
+                    // WebEmbed URL, so it's disable-able without a rebuild.
+                    if (!noPoTokenProviderSet
+                            && !"0".equals(System.getenv("WEBEMBED_CONTENT_POT"))) {
+                        try {
+                            final org.schabi.newpipe.extractor.services.youtube.PoTokenResult webEmbedPot =
+                                    poTokenProviderInstance.getWebEmbedClientPoToken(videoId);
+                            if (webEmbedPot != null && webEmbedPot.streamingDataPoToken != null) {
+                                webEmbedStreamingUrlsPoToken = webEmbedPot.streamingDataPoToken;
+                                System.out.println("[NPE/WebEmbedModern] applied content-bound streaming pot for " + videoId);
+                            } else {
+                                System.out.println("[NPE/WebEmbedModern] no content-bound streaming pot (provider returned null)");
+                            }
+                        } catch (final Exception ep) {
+                            System.out.println("[NPE/WebEmbedModern] content-pot err: " + ep.getMessage());
+                        }
+                    }
                     if (playerResponse == null) {
                         playerResponse = webEmbedResp;
                         System.out.println("[NPE/WebEmbedModern] playerResponse set, streamingData has " + (webEmbedStreamingData != null ? "data" : "NO data"));
