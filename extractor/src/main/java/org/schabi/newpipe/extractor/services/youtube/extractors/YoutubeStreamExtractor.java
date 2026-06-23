@@ -911,6 +911,9 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // directly via the TV client (poToken-free, non-403). Takes precedence
         // over WebEmbed when both are set.
         final boolean enableTvHtml5 = Boolean.TRUE.equals(FORCE_TVHTML5_FOR_THREAD.get());
+        // Diagnostic: env FORCE_VISIONOS=1 forces the VISIONOS client (skips Android),
+        // mirrors ENABLE_WEB_EMBED_MODERN. Smoke-tested 2026-06-23. Off by default.
+        final boolean forceVisionOs = "1".equals(System.getenv("FORCE_VISIONOS"));
         // NOTE (merge 2026-06-20): upstream's simple sequential client flow
         // (android -> ios -> visionOs -> webMetadata) is intentionally dropped
         // here — our bounded-wait cascade below supersedes it and does the
@@ -950,7 +953,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
                 });
 
         boolean androidOk = false;
-        if (!enableWebEmbedModern && !enableTvHtml5) {
+        if (!enableWebEmbedModern && !enableTvHtml5 && !forceVisionOs) {
             try {
                 androidOk = CompletableFuture.supplyAsync(() -> {
                     try {
@@ -1182,7 +1185,7 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         // path. Hedge against SABR enforcement spreading to ANDROID_VR (upstream PR #1508).
         // Dormant unless the Android cascade degraded/failed; on made-for-kids it yields no
         // adaptive formats, so it falls through to the WebEmbed block below.
-        if ((playerResponse == null || degraded) && !enableWebEmbedModern && !enableTvHtml5) {
+        if ((playerResponse == null || degraded || forceVisionOs) && !enableWebEmbedModern && !enableTvHtml5) {
             try {
                 visionOsCpn = generateContentPlaybackNonce();
                 final JsonObject visionOsResp = YoutubeStreamHelper.getVisionOsPlayerResponse(
