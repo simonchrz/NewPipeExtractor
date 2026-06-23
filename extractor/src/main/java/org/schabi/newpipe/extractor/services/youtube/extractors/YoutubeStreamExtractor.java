@@ -1177,7 +1177,33 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         final boolean degraded =
             !hasAdaptiveFormats(androidVrStreamingData) &&
             !hasAdaptiveFormats(androidStreamingData);
-        if ((playerResponse == null || degraded) && !enableWebEmbedModern) {
+        // Stage 1.5 -- VISIONOS (non-SABR, multi-audio, NOT made-for-kids): a lightweight
+        // visitorData-based fallback (no poToken mint) tried BEFORE the heavier WebEmbed/nsig
+        // path. Hedge against SABR enforcement spreading to ANDROID_VR (upstream PR #1508).
+        // Dormant unless the Android cascade degraded/failed; on made-for-kids it yields no
+        // adaptive formats, so it falls through to the WebEmbed block below.
+        if ((playerResponse == null || degraded) && !enableWebEmbedModern && !enableTvHtml5) {
+            try {
+                visionOsCpn = generateContentPlaybackNonce();
+                final JsonObject visionOsResp = YoutubeStreamHelper.getVisionOsPlayerResponse(
+                        contentCountry, localization, videoId, visionOsCpn);
+                if (!isPlayerResponseNotValid(visionOsResp, videoId)
+                        && hasAdaptiveFormats(visionOsResp.getObject(STREAMING_DATA))) {
+                    visionOsStreamingData = visionOsResp.getObject(STREAMING_DATA);
+                    playerResponse = visionOsResp;
+                    if (isNullOrEmpty(playerCaptionsTracklistRenderer)) {
+                        playerCaptionsTracklistRenderer = visionOsResp.getObject(CAPTIONS)
+                                .getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER);
+                    }
+                    System.out.println("[NPE/VisionOsFallback] auto-activated after Android cascade blocked");
+                }
+            } catch (final Exception eVO) {
+                System.out.println("[NPE/VisionOsFallback] failed: " + eVO.getMessage());
+            }
+        }
+
+        if ((playerResponse == null || degraded) && !enableWebEmbedModern
+                && !hasAdaptiveFormats(visionOsStreamingData)) {
             if (playerResponse != null && degraded) {
                 System.out.println("[NPE/WebEmbedFallback] degraded streams (no adaptiveFormats in VR+ANDROID), triggering WebEmbed");
             }
@@ -1220,7 +1246,8 @@ public class YoutubeStreamExtractor extends StreamExtractor {
         }
 
         if (!androidOk && iosStreamingData == null && androidVrStreamingData == null
-                && webEmbedStreamingData == null && tvHtml5StreamingData == null) {
+                && webEmbedStreamingData == null && tvHtml5StreamingData == null
+                && visionOsStreamingData == null) {
             throw new SignInConfirmNotBotException(
                 "YouTube probably temporarily blocked anonymous watch access with this IP");
         }
