@@ -190,14 +190,23 @@ public final class YoutubeStreamHelper {
                     && embeddedPlayerEncryptedContext != null) {
                 break;
             }
+            // Diagnostic: a complete embed page is ~135-140 KB and ends with
+            // </html>; the observed flap signature (vd+aid present, epec+ehf
+            // missing) is exactly what a body truncated near the 32 KB mark
+            // produces (field layout: vd@~30k aid@~31.5k epec@~32k ehf@~71k).
+            // size+tail in the log decides truncation vs. genuine page variant.
+            final boolean htmlComplete = embedHtml.trim().endsWith("</html>");
             if (fetchAttempt >= 1) {
                 throw new ExtractionException("WebEmbed modern: required field missing in embed page "
                         + "(visitorData=" + (visitorData != null) + " ehf=" + (encryptedHostFlags != null)
-                        + " aid=" + (appInstallData != null) + " epec=" + (embeddedPlayerEncryptedContext != null) + ")");
+                        + " aid=" + (appInstallData != null) + " epec=" + (embeddedPlayerEncryptedContext != null)
+                        + " size=" + embedHtml.length() + " htmlComplete=" + htmlComplete + ")");
             }
             System.out.println("[NPE/WebEmbedModern] " + videoId
                     + " embed page missing fields (ehf=" + (encryptedHostFlags != null)
-                    + " epec=" + (embeddedPlayerEncryptedContext != null) + ") -> refetch in 1s");
+                    + " epec=" + (embeddedPlayerEncryptedContext != null)
+                    + " size=" + embedHtml.length() + " htmlComplete=" + htmlComplete
+                    + ") -> refetch in 1s");
             try {
                 Thread.sleep(1000);
             } catch (final InterruptedException ie) {
