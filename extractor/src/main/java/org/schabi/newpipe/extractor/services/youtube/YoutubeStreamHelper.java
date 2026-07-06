@@ -160,21 +160,50 @@ public final class YoutubeStreamHelper {
         embedHeaders.put("Accept-Language", java.util.List.of("en-us,en;q=0.5"));
         embedHeaders.put("Sec-Fetch-Mode", java.util.List.of("navigate"));
         embedHeaders.put("Referer", java.util.List.of(thirdPartyReferer));
-        final String embedHtml = getDownloader().get(embedUrl, embedHeaders, localization).responseBody();
+        // YouTube intermittently serves an embed-page variant missing the
+        // ytcfg fields (encryptedHostFlags/embeddedPlayerEncryptedContext) —
+        // a per-request flap, not a property of the video: the same URL
+        // returns a complete page seconds later (2026-07-06: 5 of ~85
+        // WebEmbed attempts in 48h; hard-failed a made-for-kids video whose
+        // ONLY working path is WebEmbed). One delayed refetch absorbs the
+        // flap; genuinely blocked videos fail on the second fetch too.
+        String visitorData;
+        String encryptedHostFlags;
+        String appInstallData;
+        String embeddedPlayerEncryptedContext;
+        String rolloutToken;
+        String deviceExperimentId;
+        String clickTrackingParams;
+        for (int fetchAttempt = 0; ; fetchAttempt++) {
+            final String embedHtml =
+                    getDownloader().get(embedUrl, embedHeaders, localization).responseBody();
 
-        final String visitorData = extractEmbedField(embedHtml, "visitorData");
-        final String encryptedHostFlags = extractEmbedField(embedHtml, "encryptedHostFlags");
-        final String appInstallData = extractEmbedField(embedHtml, "appInstallData");
-        final String embeddedPlayerEncryptedContext = extractEmbedField(embedHtml, "embeddedPlayerEncryptedContext");
-        final String rolloutToken = extractEmbedField(embedHtml, "rolloutToken");
-        final String deviceExperimentId = extractEmbedField(embedHtml, "deviceExperimentId");
-        final String clickTrackingParams = extractEmbedField(embedHtml, "clickTrackingParams");
+            visitorData = extractEmbedField(embedHtml, "visitorData");
+            encryptedHostFlags = extractEmbedField(embedHtml, "encryptedHostFlags");
+            appInstallData = extractEmbedField(embedHtml, "appInstallData");
+            embeddedPlayerEncryptedContext = extractEmbedField(embedHtml, "embeddedPlayerEncryptedContext");
+            rolloutToken = extractEmbedField(embedHtml, "rolloutToken");
+            deviceExperimentId = extractEmbedField(embedHtml, "deviceExperimentId");
+            clickTrackingParams = extractEmbedField(embedHtml, "clickTrackingParams");
 
-        if (visitorData == null || encryptedHostFlags == null || appInstallData == null
-                || embeddedPlayerEncryptedContext == null) {
-            throw new ExtractionException("WebEmbed modern: required field missing in embed page "
-                    + "(visitorData=" + (visitorData != null) + " ehf=" + (encryptedHostFlags != null)
-                    + " aid=" + (appInstallData != null) + " epec=" + (embeddedPlayerEncryptedContext != null) + ")");
+            if (visitorData != null && encryptedHostFlags != null && appInstallData != null
+                    && embeddedPlayerEncryptedContext != null) {
+                break;
+            }
+            if (fetchAttempt >= 1) {
+                throw new ExtractionException("WebEmbed modern: required field missing in embed page "
+                        + "(visitorData=" + (visitorData != null) + " ehf=" + (encryptedHostFlags != null)
+                        + " aid=" + (appInstallData != null) + " epec=" + (embeddedPlayerEncryptedContext != null) + ")");
+            }
+            System.out.println("[NPE/WebEmbedModern] " + videoId
+                    + " embed page missing fields (ehf=" + (encryptedHostFlags != null)
+                    + " epec=" + (embeddedPlayerEncryptedContext != null) + ") -> refetch in 1s");
+            try {
+                Thread.sleep(1000);
+            } catch (final InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new ExtractionException("WebEmbed modern: interrupted during embed refetch", ie);
+            }
         }
 
         // 2. Build the modern request body. JSON-escape strings defensively.
