@@ -82,7 +82,7 @@ public class Localization implements Serializable {
      * @return A correctly formatted localizationCode for this localization.
      */
     public String getLocalizationCode() {
-        return languageCode + (countryCode == null ? "" : "-" + countryCode);
+        return languageCode + (countryCode == null || countryCode.isEmpty() ? "" : "-" + countryCode);
     }
 
     @Override
