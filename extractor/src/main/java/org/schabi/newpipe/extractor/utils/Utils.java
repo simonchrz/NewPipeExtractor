@@ -84,14 +84,22 @@ public final class Utils {
      */
     public static long mixedNumberWordToLong(final String numberWord)
             throws NumberFormatException, ParsingException {
-        String multiplier = "";
-        try {
-            multiplier = Parser.matchGroup("[\\d]+([\\.,][\\d]+)?([KMBkmb])+", numberWord, 2);
-        } catch (final ParsingException ignored) {
+        // Die ganze Zahl einsammeln, auch mit mehreren Trennzeichen
+        // ("1.799.678.317"). Das alte Muster nahm nur EINE Gruppe.
+        final String digits = Parser.matchGroup1("([\\d]+(?:[\\.,][\\d]+)*)", numberWord);
+        final String multiplier = findMultiplier(numberWord, digits);
+
+        if (multiplier.isEmpty()) {
+            // OHNE Einheit sind alle Trennzeichen TAUSENDERTRENNER — in jeder
+            // Sprache. Sie einfach zu entfernen ist hier richtig und war der
+            // Fehler der alten Fassung: sie las den deutschen Tausenderpunkt
+            // als Dezimalpunkt, "41.054 Aufrufe" wurde zu 41.
+            return Long.parseLong(digits.replaceAll("[.,]", ""));
         }
-        final double count = Double.parseDouble(
-                Parser.matchGroup1("([\\d]+([\\.,][\\d]+)?)", numberWord).replace(",", "."));
-        switch (multiplier.toUpperCase()) {
+
+        // MIT Einheit ist das Trennzeichen ein Dezimaltrenner ("10.5K", "4,53 Mio").
+        final double count = Double.parseDouble(digits.replace(",", "."));
+        switch (multiplier) {
             case "K":
                 return (long) (count * 1e3);
             case "M":
@@ -99,8 +107,64 @@ public final class Utils {
             case "B":
                 return (long) (count * 1e9);
             default:
-                return (long) (count);
+                return (long) count;
         }
+    }
+
+    /**
+     * Find the magnitude unit that belongs to {@code digits} inside {@code text}.
+     *
+     * <p>
+     * Returns {@code "K"}, {@code "M"}, {@code "B"} or an empty string.
+     * </p>
+     *
+     * <p>
+     * Two rules, both deliberate:
+     * </p>
+     *
+     * <ul>
+     *     <li>A single letter only counts when it is ATTACHED to the number
+     *     ("10.5K"). Otherwise "5 Bewertungen" or "42 Abonnenten" would be read
+     *     as billions — the word simply happens to start with B.</li>
+     *     <li>Word forms are matched from an explicit list, never by substring
+     *     search.</li>
+     * </ul>
+     */
+    @Nonnull
+    private static String findMultiplier(@Nonnull final String text,
+                                         @Nonnull final String digits) {
+        final int end = text.indexOf(digits) + digits.length();
+        if (end >= text.length()) {
+            return "";
+        }
+        final String rest = text.substring(end);
+
+        // Direkt angehaengt: "10.5K", "1,5B"
+        final char first = rest.charAt(0);
+        switch (Character.toUpperCase(first)) {
+            case 'K':
+                return "K";
+            case 'M':
+                return "M";
+            case 'B':
+                return "B";
+            default:
+                break;
+        }
+
+        // Durch Leerzeichen getrennte WORTform, nur aus dieser Liste.
+        // YouTube benutzt dabei auch das geschuetzte Leerzeichen (U+00A0).
+        final String word = rest.replace('\u00a0', ' ').trim().toLowerCase();
+        if (word.startsWith("tsd")) {
+            return "K";
+        }
+        if (word.startsWith("mio") || word.startsWith("mill")) {
+            return "M";
+        }
+        if (word.startsWith("mrd") || word.startsWith("billion")) {
+            return "B";
+        }
+        return "";
     }
 
     /**
